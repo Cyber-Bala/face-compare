@@ -1,0 +1,8 @@
+opencv-python
+onnxruntime
+numpy
+fastapi
+uvicorn
+python-multipart
+cryptography
+httpx

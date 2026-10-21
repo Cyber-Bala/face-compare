@@ -1,0 +1,9 @@
+venv/
+data/
+models/*.onnx*
+__pycache__/
+*.log
+*.npz
+tests/*.jpg
+*.pem
+*.token

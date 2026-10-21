@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Face Verification</title>
+<style>
+  :root { --bg:#f6f7f9; --fg:#14181f; --card:#fff; --mut:#5b6572; --ok:#0b8a4a; --bad:#c0392b; --acc:#1f5eff; --bd:#d9dee6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#10141a; --fg:#e8ecf1; --card:#181e27; --mut:#9aa6b5; --bd:#2a3340; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.2rem; margin:0 0 12px }
+  h2 { font-size:1rem; margin:0 0 8px }
+  nav { display:flex; gap:8px; margin-bottom:12px }
+  nav button { flex:1; background:var(--card); color:var(--fg); border:1px solid var(--bd); }
+  nav button.on { background:var(--acc); color:#fff; border-color:var(--acc) }
+  .card { background:var(--card); border:1px solid var(--bd); border-radius:12px; padding:16px; margin-bottom:12px }
+  label { display:block; font-size:.85rem; color:var(--mut); margin:10px 0 4px }
+  input { width:100%; padding:10px; font-size:1rem; border:1px solid var(--bd); border-radius:8px; background:var(--bg); color:var(--fg) }
+  button { padding:12px 14px; font-size:1rem; border:0; border-radius:8px; background:var(--acc); color:#fff; cursor:pointer }
+  button:disabled { opacity:.5 }
+  button.del { background:var(--bad); padding:8px 12px; font-size:.9rem }
+  .full { width:100%; margin-top:12px }
+  .res { padding:14px; border-radius:10px; font-weight:600; margin-top:12px }
+  .res.ok { background:color-mix(in srgb,var(--ok) 15%,transparent); color:var(--ok) }
+  .res.bad { background:color-mix(in srgb,var(--bad) 15%,transparent); color:var(--bad) }
+  .res.info { background:color-mix(in srgb,var(--acc) 12%,transparent); color:var(--acc) }
+  .hide { display:none }
+  .cam { background:#000; border-radius:12px; overflow:hidden; aspect-ratio:3/4; margin-top:12px }
+  video { width:100%; height:100%; object-fit:cover; transform:scaleX(-1) }
+  .stu { display:flex; gap:12px; align-items:center; padding:10px 0; border-top:1px solid var(--bd) }
+  .stu:first-child { border-top:0 }
+  .stu img { width:64px; height:64px; object-fit:cover; border-radius:8px; background:var(--bd) }
+  .stu .meta { flex:1; min-width:0 }
+  .stu .meta b, .stu .meta small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+  small { color:var(--mut) }
+</style>
+</head>
+<body>
+<main>
+  <h1>Face Verification Portal</h1>
+  <nav>
+    <button id="tabV" class="on">Verify</button>
+    <button id="tabA">Admin</button>
+  </nav>
+
+  <section id="pV">
+    <div class="card">
+      <label for="sid">Student ID</label>
+      <input id="sid" autocomplete="off" autocapitalize="characters" placeholder="Enter your ID">
+      <button id="vcam" class="full">Open camera</button>
+      <div id="camBox" class="hide">
+        <div class="cam"><video id="vid" playsinline muted></video></div>
+        <button id="vgo" class="full">Capture and verify</button>
+      </div>
+    </div>
+    <div id="vres"></div>
+  </section>
+
+  <section id="pA" class="hide">
+    <div class="card">
+      <label for="tok">Admin token</label>
+      <input id="tok" type="password" autocomplete="off">
+      <button id="login" class="full">Open admin</button>
+    </div>
+    <div id="adm" class="hide">
+      <div class="card">
+        <h2>Register student</h2>
+        <label for="aid">Student ID</label>
+        <input id="aid" autocomplete="off">
+        <label for="aname">Name</label>
+        <input id="aname">
+        <label for="aphoto">ID photo</label>
+        <input id="aphoto" type="file" accept="image/*">
+        <button id="reg" class="full">Register</button>
+        <div id="ares"></div>
+      </div>
+      <div class="card">
+        <h2>Registered students (<span id="cnt">0</span>)</h2>
+        <div id="list"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const out = (el, cls, msg) => { el.innerHTML = '<div class="res ' + cls + '"></div>'; el.firstChild.textContent = msg; };
+const detail = async r => { try { return (await r.json()).detail || 'Error'; } catch { return 'Error ' + r.status; } };
+
+$('tabV').onclick = () => { $('pV').classList.remove('hide'); $('pA').classList.add('hide'); $('tabV').className = 'on'; $('tabA').className = ''; };
+$('tabA').onclick = () => { $('pA').classList.remove('hide'); $('pV').classList.add('hide'); $('tabA').className = 'on'; $('tabV').className = ''; };
+
+// ---- verify: live camera only, no file upload ----
+let stream = null;
+function stopCam() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } $('camBox').classList.add('hide'); $('vcam').classList.remove('hide'); }
+$('tabA').addEventListener('click', stopCam);
+
+$('vcam').onclick = async () => {
+  if (!$('sid').value.trim()) return out($('vres'), 'bad', 'Enter your Student ID first.');
+  try {
+    if (!navigator.mediaDevices) throw new Error('Camera needs HTTPS.');
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
+  } catch (e) { return out($('vres'), 'bad', 'Camera unavailable: ' + e.message); }
+  $('vid').srcObject = stream; await $('vid').play();
+  $('camBox').classList.remove('hide'); $('vcam').classList.add('hide');
+  out($('vres'), 'info', 'Look straight at the camera, then press Capture.');
+};
+
+function snap() {
+  const v = $('vid'), c = document.createElement('canvas');
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  return new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+}
+
+$('vgo').onclick = async () => {
+  const id = $('sid').value.trim();
+  if (!id) return out($('vres'), 'bad', 'Student ID required.');
+  $('vgo').disabled = true; out($('vres'), 'info', 'Checking...');
+  const fd = new FormData(); fd.append('student_id', id);
+  for (let i = 0; i < 5; i++) { fd.append('photos', await snap(), 'f' + i + '.jpg'); await new Promise(r => setTimeout(r, 250)); }
+  try {
+    const r = await fetch('/api/verify', { method: 'POST', body: fd });
+    if (!r.ok) out($('vres'), 'bad', await detail(r));
+    else {
+      const j = await r.json();
+      if (j.status === 'VERIFIED') { out($('vres'), 'ok', 'VERIFIED: ' + j.name); stopCam(); }
+      else if (j.status === 'RETRY') out($('vres'), 'info', j.message + (j.score !== undefined ? ' [score ' + j.score + ', need ' + j.threshold + ']' : '') + (j.attempts_left ? ' (' + j.attempts_left + ' tries left)' : ''));
+      else { out($('vres'), 'bad', 'GO TO ADMIN. ' + j.message); stopCam(); }
+    }
+  } catch { out($('vres'), 'bad', 'Network error.'); }
+  $('vgo').disabled = false;
+};
+
+// ---- admin ----
+const H = () => ({ 'X-Admin-Token': $('tok').value });
+
+async function loadList() {
+  const r = await fetch('/api/admin/students', { headers: H() });
+  if (!r.ok) { $('adm').classList.add('hide'); return out($('ares'), 'bad', await detail(r)); }
+  const rows = await r.json();
+  $('cnt').textContent = rows.length;
+  const box = $('list'); box.innerHTML = '';
+  if (!rows.length) { box.innerHTML = '<small>None yet.</small>'; return; }
+  for (const s of rows) {
+    const d = document.createElement('div'); d.className = 'stu';
+    const img = document.createElement('img'); img.alt = '';
+    const m = document.createElement('div'); m.className = 'meta';
+    const b = document.createElement('b'); b.textContent = s.name;
+    const sm = document.createElement('small'); sm.textContent = s.student_id + ' · ' + s.enrolled_at.slice(0, 10);
+    m.append(b, sm);
+    const del = document.createElement('button'); del.className = 'del'; del.textContent = 'Delete';
+    del.onclick = async () => {
+      if (!confirm('Delete ' + s.name + ' (' + s.student_id + ')? This removes their face data and verification history.')) return;
+      const rr = await fetch('/api/admin/students/' + encodeURIComponent(s.student_id), { method: 'DELETE', headers: H() });
+      if (!rr.ok) alert(await detail(rr));
+      loadList();
+    };
+    d.append(img, m, del); box.append(d);
+    fetch('/api/admin/students/' + encodeURIComponent(s.student_id) + '/photo', { headers: H() })
+      .then(x => x.ok ? x.blob() : null).then(bl => { if (bl) img.src = URL.createObjectURL(bl); });
+  }
+}
+
+$('login').onclick = async () => {
+  const r = await fetch('/api/admin/students', { headers: H() });
+  if (!r.ok) return alert(await detail(r));
+  $('adm').classList.remove('hide'); loadList();
+};
+
+$('reg').onclick = async () => {
+  const id = $('aid').value.trim(), name = $('aname').value.trim(), f = $('aphoto').files[0];
+  if (!id || !name || !f) return out($('ares'), 'bad', 'ID, name and photo required.');
+  $('reg').disabled = true;
+  const fd = new FormData(); fd.append('student_id', id); fd.append('name', name); fd.append('photo', f);
+  const r = await fetch('/api/admin/register', { method: 'POST', headers: H(), body: fd });
+  if (r.ok) { out($('ares'), 'ok', 'Registered ' + name + '.'); $('aid').value = $('aname').value = $('aphoto').value = ''; loadList(); }
+  else out($('ares'), 'bad', await detail(r));
+  $('reg').disabled = false;
+};
+</script>
+</body>
+</html>
