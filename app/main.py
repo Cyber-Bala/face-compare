@@ -6,9 +6,10 @@ Admin endpoints need header  X-Admin-Token: <ADMIN_TOKEN env or data/admin.token
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -21,7 +22,71 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,40}$")
 
 app = FastAPI(title="Face Verification Portal")
 engine = None
-attempts: dict[str, int] = {}  # failed attempts per student (in memory)
+
+MAX_PHOTO_BYTES = 8 * 1024 * 1024  # one photo
+MAX_PHOTOS = 10                    # photos per request
+LOCK_SECONDS = 30 * 60             # how long a student+device lock-out lasts
+IP_FAIL_LIMIT, IP_FAIL_WINDOW = 20, 15 * 60  # failed matches allowed per device per 15 minutes
+
+# Failed matches are counted per student AND per client address, and they expire. Counting per student only
+# let anyone on the internet lock any student out just by sending wrong faces for their ID.
+attempts: dict[tuple[str, str], tuple[int, float]] = {}  # (student, ip) -> (failures, first failure time)
+ip_failures: dict[str, list[float]] = {}                  # ip -> failure times
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _fails(student_id: str, ip: str) -> int:
+    n, first = attempts.get((student_id, ip), (0, 0.0))
+    if n and time.time() - first > LOCK_SECONDS:
+        attempts.pop((student_id, ip), None)
+        return 0
+    return n
+
+
+def _record_fail(student_id: str, ip: str) -> int:
+    now = time.time()
+    n, first = attempts.get((student_id, ip), (0, now))
+    if n and now - first > LOCK_SECONDS:
+        n, first = 0, now
+    attempts[(student_id, ip)] = (n + 1, first if n else now)
+    recent = [t for t in ip_failures.get(ip, []) if now - t < IP_FAIL_WINDOW]
+    recent.append(now)
+    ip_failures[ip] = recent
+    if len(attempts) > 5000:  # keep memory bounded
+        for k in [k for k, (_, t) in attempts.items() if now - t > LOCK_SECONDS]:
+            attempts.pop(k, None)
+    return n + 1
+
+
+def _ip_blocked(ip: str) -> bool:
+    now = time.time()
+    return len([t for t in ip_failures.get(ip, []) if now - t < IP_FAIL_WINDOW]) >= IP_FAIL_LIMIT
+
+
+def _clear_attempts(student_id: str) -> None:
+    for k in [k for k in attempts if k[0] == student_id]:
+        attempts.pop(k, None)
+
+
+async def _read_photo(f: UploadFile) -> bytes:
+    data = await f.read(MAX_PHOTO_BYTES + 1)
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(413, "Photo is too large (max 8 MB).")
+    return data
+
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 def _admin_token():
@@ -66,29 +131,34 @@ def health():
 
 # ---------------- verification: upload a photo, get the result ----------------
 @app.post("/api/verify")
-async def verify(student_id: str = Form(...), photos: list[UploadFile] = File(...)):
+async def verify(request: Request, student_id: str = Form(...), photos: list[UploadFile] = File(...)):
+    ip = _client_ip(request)
+    if _ip_blocked(ip):
+        raise HTTPException(429, "Too many failed attempts from this device. Try again later or meet the admin.")
+    if len(photos) > MAX_PHOTOS:
+        raise HTTPException(413, f"Send at most {MAX_PHOTOS} photos.")
     student_id = student_id.strip()
     s = db.get_student(student_id)
     if not s:
         raise HTTPException(404, "Student ID not registered.")
     max_a = engine.cfg["max_attempts"]
-    if attempts.get(student_id, 0) >= max_a:
+    if _fails(student_id, ip) >= max_a:
         return {"status": "GO_TO_ADMIN", "message": FAIL_MSG}
     try:
-        score = engine.match_frames([await f.read() for f in photos], s["embedding"])
+        score = engine.match_frames([await _read_photo(f) for f in photos], s["embedding"])
     except QualityError as e:
         return {"status": "RETRY", "message": str(e)}  # unusable photo: not counted as a failed match
     _log(student_id, score)
     if engine.accept(score):
-        attempts.pop(student_id, None)
+        attempts.pop((student_id, ip), None)
         db.add_verification(student_id, score)
         return {"status": "VERIFIED", "name": s["name"], "score": round(score, 4)}
-    attempts[student_id] = attempts.get(student_id, 0) + 1
-    if attempts[student_id] >= max_a:
+    failures = _record_fail(student_id, ip)
+    if failures >= max_a:
         return {"status": "GO_TO_ADMIN", "message": FAIL_MSG, "score": round(score, 3)}
     return {"status": "RETRY", "message": "Face did not match. Try again in good light, facing the camera.",
             "score": round(score, 3), "threshold": engine.cfg["t_accept"],
-            "attempts_left": max_a - attempts[student_id]}
+            "attempts_left": max_a - failures}
 
 
 # ---------------- admin ----------------
@@ -101,7 +171,7 @@ async def register(student_id: str = Form(...), name: str = Form(...), photo: Up
         raise HTTPException(422, "Name required.")
     if db.get_student(student_id):
         raise HTTPException(409, "Student ID already registered. Delete it first to register again.")
-    data = await photo.read()
+    data = await _read_photo(photo)
     try:
         emb = engine.embed_photo(data)
         thumb = thumbnail(data)
@@ -125,7 +195,7 @@ async def match(student_id: str = Form(...), photos: list[UploadFile] = File(...
     if not s:
         raise HTTPException(404, "No photo registered for this student.")
     try:
-        score = engine.match_frames([await f.read() for f in photos], s["embedding"])
+        score = engine.match_frames([await _read_photo(f) for f in photos], s["embedding"])
     except QualityError as e:
         raise HTTPException(422, str(e))
     return {"match": engine.accept(score), "score": round(score, 4), "threshold": engine.cfg["t_accept"]}
@@ -148,7 +218,7 @@ def student_photo(student_id: str):
 def delete_student(student_id: str):
     if not db.delete_student(student_id):
         raise HTTPException(404, "Student ID not found.")
-    attempts.pop(student_id, None)
+    _clear_attempts(student_id)
     return {"deleted": student_id}
 
 
