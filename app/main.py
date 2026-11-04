@@ -129,6 +129,26 @@ def health():
     return {"ok": True, "students": len(db.list_students())}
 
 
+# ---------------- photo check: is this capture usable? (no matching, nothing stored) ----------------
+CHECK_PER_MINUTE = 90
+_check_hits: dict[str, list[float]] = {}
+
+
+@app.post("/api/check")
+async def check_photo(request: Request, photo: UploadFile = File(...)):
+    ip = _client_ip(request)
+    now = time.time()
+    recent = [t for t in _check_hits.get(ip, []) if now - t < 60]
+    if len(recent) >= CHECK_PER_MINUTE:
+        raise HTTPException(429, "Too many photo checks. Wait a moment.")
+    recent.append(now)
+    _check_hits[ip] = recent
+    result = engine.check_photo(await _read_photo(photo))
+    if not result["ok"]:
+        result["message"] = "Please retake the photo. " + result["message"]
+    return result
+
+
 # ---------------- verification: upload a photo, get the result ----------------
 @app.post("/api/verify")
 async def verify(request: Request, student_id: str = Form(...), photos: list[UploadFile] = File(...)):

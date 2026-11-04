@@ -96,14 +96,25 @@ class Engine:
             raise QualityError("Face too small or too far. Move closer to the camera.")
         if q["det_score"] < c["min_det_score"]:
             raise QualityError("Face not clear. Retake the photo facing the camera.")
-        if q["blur"] < c["min_blur"]:
-            raise QualityError("Photo is blurry or shaky. Hold still and retake in focus.")
         if q["brightness"] < c["min_brightness"]:
             raise QualityError("Photo too dark. Retake in better light.")
         if q["brightness"] > c["max_brightness"]:
             raise QualityError("Photo too bright. Avoid strong light behind or on the face.")
         if q["contrast"] < c["min_contrast"]:
             raise QualityError("Photo is washed out or flat. Retake in even, good light.")
+        if q["blur"] < c["min_blur"]:
+            raise QualityError("Photo is blurry or shaky. Hold still and retake in focus.")
+
+    def check_photo(self, data: bytes) -> dict:
+        """Is this one captured photo usable? Same checks as matching (one clear face, light, sharpness, size,
+        pose), but nothing is matched or stored. Returns {ok, message}."""
+        try:
+            img = decode(data)
+            _, q = self._one_face(img)
+            self._check_quality(q)
+        except QualityError as e:
+            return {"ok": False, "message": str(e)}
+        return {"ok": True, "message": "Photo is clear."}
 
     def embed_photos(self, datas):
         """Several live frames -> one averaged unit embedding. Frames without a usable face are skipped."""

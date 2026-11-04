@@ -117,7 +117,17 @@ function snap() {
 $('vgo').onclick = async () => {
   const id = $('sid').value.trim();
   if (!id) return out($('vres'), 'bad', 'Student ID required.');
-  $('vgo').disabled = true; out($('vres'), 'info', 'Checking...');
+  $('vgo').disabled = true; out($('vres'), 'info', 'Checking your photo...');
+  // First check one frame: clear face, enough light, sharp, close enough. If not, ask to retake right away.
+  try {
+    const f0 = new FormData(); f0.append('photo', await snap(), 'probe.jpg');
+    const cr = await fetch('/api/check', { method: 'POST', body: f0 });
+    if (cr.ok) {
+      const c = await cr.json();
+      if (!c.ok) { out($('vres'), 'bad', c.message); $('vgo').disabled = false; return; }
+    }
+  } catch { /* check unavailable: carry on, the full check still runs below */ }
+  out($('vres'), 'info', 'Checking...');
   const fd = new FormData(); fd.append('student_id', id);
   for (let i = 0; i < 5; i++) { fd.append('photos', await snap(), 'f' + i + '.jpg'); await new Promise(r => setTimeout(r, 250)); }
   try {
