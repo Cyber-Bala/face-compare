@@ -27,6 +27,7 @@ DEFAULTS = {
     "min_contrast": 20.0,    # gray std of aligned face: flat / washed out
     "min_det_score": 0.5,    # detector confidence
     "max_abs_roll": 35.0,    # degrees of head tilt
+    "min_enhance_similarity": 0.7,  # an enhanced ID photo must stay this close to the original face
 }
 
 
@@ -73,8 +74,8 @@ class Engine:
             raise QualityError("No face found in the photo. Use a clearer photo showing the face.")
         f = faces[0]
         faces = [f] + [g for g in faces[1:] if not _is_ghost(f, g)]
-        if len(faces) > 1 and faces[1].box[2] * faces[1].box[3] > 0.25 * f.box[2] * f.box[3]:
-            raise QualityError("More than one face in the photo.")
+        if len(faces) > 1 and faces[1].box[2] * faces[1].box[3] > 0.10 * f.box[2] * f.box[3]:
+            raise QualityError("More than one person in the photo. Only you should be in the picture.")
         crop = align(img, f.landmarks)
         return crop, quality(img, f, crop)
 
@@ -84,6 +85,31 @@ class Engine:
         crop, q = self._one_face(img)
         self._check_quality(q)
         return self.emb.embed(crop)
+
+    def embed_id_photo(self, data: bytes):
+        """ID photo bytes -> (unit embedding, enhanced?). Raises QualityError.
+
+        Old ID photos are often small or soft. When the normal check refuses one, the photo is upscaled and
+        cleaned (see enhance) and checked again by the same rules. The enhanced vector is kept only if it
+        still describes the same face as the original, so the clean-up cannot invent a different person.
+        """
+        img = decode(data)
+        try:
+            crop, q = self._one_face(img)
+            self._check_quality(q)
+            return self.emb.embed(crop), False
+        except QualityError as first:
+            refused = first
+        crop2, q2 = self._one_face(enhance(img))
+        self._check_quality(q2)
+        vec = self.emb.embed(crop2)
+        try:
+            original, _ = self._one_face(img)
+        except QualityError:
+            raise refused
+        if self.score(vec, self.emb.embed(original)) < self.cfg["min_enhance_similarity"]:
+            raise refused
+        return vec, True
 
     def _check_quality(self, q):
         """Reject unusable photos before matching. Raises QualityError."""
@@ -156,11 +182,14 @@ class Engine:
         return score >= self.cfg["t_accept"]
 
 
-def thumbnail(data: bytes, side=360) -> bytes:
-    """Small JPEG of the uploaded photo, kept for the admin list."""
-    img = decode(data)
+def enhance(img):
+    """Upscale a small or soft ID photo and clean it: Lanczos upscale, light denoise, even lighting, sharpen."""
     h, w = img.shape[:2]
-    k = side / max(h, w)
-    if k < 1:
-        img = cv2.resize(img, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA)
-    return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+    k = min(4.0, max(2.0, 1280 / max(h, w)))
+    up = cv2.resize(img, (int(w * k), int(h * k)), interpolation=cv2.INTER_LANCZOS4)
+    up = cv2.fastNlMeansDenoisingColored(up, None, 3, 3, 7, 15)
+    lab = cv2.cvtColor(up, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(lab[:, :, 0])
+    up = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    soft = cv2.GaussianBlur(up, (0, 0), 2.0)
+    return cv2.addWeighted(up, 1.8, soft, -0.8, 0)

@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import db
-from .verify import Engine, QualityError, thumbnail
+from .verify import Engine, QualityError
 
 ROOT = Path(__file__).resolve().parent.parent
 FAIL_MSG = "Verification failed. Please meet the admin to check your photo and re-register your face."
@@ -111,7 +111,7 @@ def _startup():
     db.init()
     if engine is None:  # shared when two servers run in one process
         engine = Engine()
-    print("ADMIN TOKEN:", _admin_token(), "(file data/admin.token)")
+    _admin_token()  # creates data/admin.token on first start; never printed, logs must not hold secrets
 
 
 def _log(student_id, score):
@@ -193,11 +193,10 @@ async def register(student_id: str = Form(...), name: str = Form(...), photo: Up
         raise HTTPException(409, "Student ID already registered. Delete it first to register again.")
     data = await _read_photo(photo)
     try:
-        emb = engine.embed_photo(data)
-        thumb = thumbnail(data)
+        emb = engine.embed_id_photo(data)[0]  # the image itself is dropped here
     except QualityError as e:
         raise HTTPException(422, str(e))
-    if not db.add_student(student_id, name, emb, thumb):
+    if not db.add_student(student_id, name, emb):
         raise HTTPException(409, "Student ID already registered.")
     return {"student_id": student_id}
 

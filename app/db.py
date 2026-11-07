@@ -76,13 +76,14 @@ def _dec(blob):
     return np.frombuffer(_f().decrypt(blob), dtype=np.float32)
 
 
-def add_student(student_id, name, emb, photo_jpeg):
-    """Insert a new student. Returns False if the ID already exists (no replacement)."""
+def add_student(student_id, name, emb):
+    """Insert a new student: the face vector only, never the image.
+    Returns False if the ID already exists (no replacement)."""
     with connect() as con:
         try:
             con.execute(
-                "INSERT INTO students(student_id,name,embedding,enrolled_at,photo) VALUES(?,?,?,?,?)",
-                (student_id, name, _enc(emb), _now(), _f().encrypt(photo_jpeg)),
+                "INSERT INTO students(student_id,name,embedding,enrolled_at,photo) VALUES(?,?,?,?,NULL)",
+                (student_id, name, _enc(emb), _now()),
             )
         except sqlite3.IntegrityError:
             return False
